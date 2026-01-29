@@ -1,0 +1,13 @@
+{
+  "name": "netlify-cors-proxy",
+  "version": "1.0.0",
+  "description": "CORS proxy hostato su Netlify con cache in localStorage",
+  "main": "index.html",
+  "scripts": {
+    "start": "netlify dev",
+    "build": "echo 'Static build'"
+  },
+  "dependencies": {
+    "node-fetch": "^2.6.7"
+  }
+}
