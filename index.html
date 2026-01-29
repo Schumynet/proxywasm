@@ -2,23 +2,36 @@
 <html lang="it">
 <head>
   <meta charset="UTF-8">
-  <title>CORS Proxy + HLS Player con estrazione stream</title>
+  <title>CORS Proxy + HLS Player</title>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    input, button { margin: 5px; }
+    pre { background: #eee; padding: 10px; max-height: 200px; overflow: auto; }
+  </style>
 </head>
 <body>
   <h1>Riproduzione HLS via Proxy</h1>
 
+  <h2>Inserisci URL diretto m3u8</h2>
+  <input id="urlInput" type="text" size="100" placeholder="https://...m3u8?token=...&expires=...">
+  <button id="playUrlBtn">Play URL</button>
+
+  <h2>Oppure usa TMDb ID (API vixsrc)</h2>
   <input id="tmdbId" type="text" placeholder="TMDb ID" size="20">
   <label><input type="checkbox" id="isMovie" checked> Movie</label>
   <input id="season" type="number" placeholder="Season" size="5">
   <input id="episode" type="number" placeholder="Episode" size="5">
-  <button id="playBtn">Play</button>
+  <button id="playTmdbBtn">Play TMDb</button>
 
+  <h2>Player</h2>
   <video id="video" controls autoplay width="640" height="360"></video>
+
+  <h2>Log</h2>
   <pre id="output"></pre>
 
   <script>
-    const VIXSRC_URL = "vixsrc.to"; // dominio base
+    const VIXSRC_URL = "vixsrc.to";
 
     function applyCorsProxy(url) {
       return `/.netlify/functions/proxy?url=${encodeURIComponent(url)}`;
@@ -30,6 +43,11 @@
 
     function showError(title, msg) {
       document.getElementById('output').textContent = title + ": " + msg;
+    }
+
+    function log(msg) {
+      console.log(msg);
+      document.getElementById('output').textContent += msg + "\n";
     }
 
     function extractBaseUrl(url) {
@@ -45,21 +63,18 @@
           vixsrcUrl += `/${season}/${episode}`;
         }
 
-        console.log("🎬 Fetching stream from:", vixsrcUrl);
+        log("🎬 Fetching stream from: " + vixsrcUrl);
 
-        showLoading(true, "Recupero pagina vixsrc...");
         const response = await fetch(applyCorsProxy(vixsrcUrl));
         const html = await response.text();
 
-        console.log("✅ Page fetched successfully, length:", html.length);
-
-        showLoading(true, "Estrazione parametri stream...");
+        log("✅ Page fetched, length: " + html.length);
 
         const playlistParamsRegex = /window\.masterPlaylist[^:]+params:[^{]+({[^<]+?})/;
         const playlistParamsMatch = html.match(playlistParamsRegex);
 
         if (!playlistParamsMatch) {
-          console.error("❌ HTML Preview:", html.substring(0, 1000));
+          log("❌ Parametri non trovati. HTML preview:\n" + html.substring(0, 500));
           throw new Error("Impossibile trovare i parametri della playlist");
         }
 
@@ -70,17 +85,10 @@
           .replace(/\\n/g, "")
           .replace(",}", "}");
 
-        console.log("📋 Playlist params string:", playlistParamsStr);
+        log("📋 Playlist params string: " + playlistParamsStr);
 
-        let playlistParams;
-        try {
-          playlistParams = JSON.parse(playlistParamsStr);
-        } catch (e) {
-          console.error("❌ Failed to parse params:", playlistParamsStr);
-          throw new Error("Errore nel parsing dei parametri: " + e.message);
-        }
-
-        console.log("✅ Parsed params:", playlistParams);
+        let playlistParams = JSON.parse(playlistParamsStr);
+        log("✅ Parsed params: " + JSON.stringify(playlistParams));
 
         const playlistUrlRegex = /window\.masterPlaylist\s*=\s*\{[\s\S]*?url:\s*'([^']+)'/;
         const playlistUrlMatch = html.match(playlistUrlRegex);
@@ -90,23 +98,21 @@
         }
 
         const playlistUrl = playlistUrlMatch[1];
-        console.log("🔗 Playlist URL:", playlistUrl);
+        log("🔗 Playlist URL: " + playlistUrl);
 
         const canPlayFHDRegex = /window\.canPlayFHD\s+?=\s+?(\w+)/;
         const canPlayFHDMatch = html.match(canPlayFHDRegex);
         const canPlayFHD = canPlayFHDMatch && canPlayFHDMatch[1] === "true";
-
-        console.log("🎥 Can play FHD:", canPlayFHD);
+        log("🎥 Can play FHD: " + canPlayFHD);
 
         const hasQuery = /\?[^#]+/.test(playlistUrl);
         const separator = hasQuery ? "&" : "?";
 
         const m3u8Url = playlistUrl + separator + "expires=" + playlistParams.expires + "&token=" + playlistParams.token + (canPlayFHD ? "&h=1" : "");
-
-        console.log("🎬 Generated m3u8 URL:", m3u8Url);
+        log("🎬 Generated m3u8 URL: " + m3u8Url);
 
         const baseStreamUrl = extractBaseUrl(m3u8Url);
-        console.log("🏠 Base stream URL:", baseStreamUrl);
+        log("🏠 Base stream URL: " + baseStreamUrl);
 
         showLoading(false);
         return { iframeUrl: vixsrcUrl, m3u8Url };
@@ -118,26 +124,24 @@
       }
     }
 
-    async function playStream() {
-      const tmdbId = document.getElementById('tmdbId').value;
-      const isMovie = document.getElementById('isMovie').checked;
-      const season = document.getElementById('season').value || null;
-      const episode = document.getElementById('episode').value || null;
-
-      const stream = await getDirectStream(tmdbId, isMovie, season, episode);
-      if (!stream) return;
-
+    function playM3u8(m3u8Url) {
       const video = document.getElementById('video');
-      const proxiedUrl = applyCorsProxy(stream.m3u8Url);
+      const proxiedUrl = applyCorsProxy(m3u8Url);
+      log("[INFO] Riproduzione via proxy: " + proxiedUrl);
 
       if (Hls.isSupported()) {
-        console.log("[INFO] hls.js supportato, carico:", proxiedUrl);
         const hls = new Hls();
         hls.loadSource(proxiedUrl);
         hls.attachMedia(video);
-        hls.on(Hls.Events.MANIFEST_PARSED, () => video.play());
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          log("[INFO] Manifest parsato, avvio playback");
+          video.play();
+        });
+        hls.on(Hls.Events.ERROR, (event, data) => {
+          log("[ERRORE HLS] " + data.details);
+        });
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        console.log("[INFO] Safari/iOS: riproduzione nativa");
+        log("[INFO] Safari/iOS: riproduzione nativa");
         video.src = proxiedUrl;
         video.play();
       } else {
@@ -145,7 +149,20 @@
       }
     }
 
-    document.getElementById('playBtn').addEventListener('click', playStream);
+    document.getElementById('playUrlBtn').addEventListener('click', () => {
+      const url = document.getElementById('urlInput').value;
+      if (url) playM3u8(url);
+    });
+
+    document.getElementById('playTmdbBtn').addEventListener('click', async () => {
+      const tmdbId = document.getElementById('tmdbId').value;
+      const isMovie = document.getElementById('isMovie').checked;
+      const season = document.getElementById('season').value || null;
+      const episode = document.getElementById('episode').value || null;
+
+      const stream = await getDirectStream(tmdbId, isMovie, season, episode);
+      if (stream) playM3u8(stream.m3u8Url);
+    });
   </script>
 </body>
 </html>
