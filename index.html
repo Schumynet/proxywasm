@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>VixSrc Proxy + Video.js (Hybrid)</title>
+  <title>VixSrc Proxy + Video.js</title>
 
-  <!-- Video.js CSS & JS -->
+  <!-- Video.js -->
   <link href="https://vjs.zencdn.net/7.21.0/video-js.css" rel="stylesheet" />
   <script src="https://vjs.zencdn.net/7.21.0/video.min.js"></script>
 
@@ -16,13 +16,11 @@
     button { padding:6px 10px; margin-left:6px; border-radius:4px; border:none; background:#1f8fff; color:#fff; cursor:pointer; }
     .video-container { width:100%; max-width:1100px; height:620px; margin-top:12px; background:#000; position:relative; }
     .video-js { width:100%; height:100%; }
-    pre#output { background:#0b0b0b; color:#9fd3ff; padding:10px; max-height:180px; overflow:auto; margin-top:12px; border-radius:6px; border:1px solid #222; }
-    #loading-overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none; }
-    .hidden { display:none !important; }
+    pre#output { background:#0b0b0b; color:#9fd3ff; padding:10px; max-height:220px; overflow:auto; margin-top:12px; border-radius:6px; border:1px solid #222; }
   </style>
 </head>
 <body>
-  <h1>VixSrc Proxy + Video.js (Hybrid)</h1>
+  <h1>VixSrc Proxy + Video.js</h1>
 
   <div class="controls">
     <label>TMDb ID <input id="tmdbId" type="text" placeholder="es. 182280"></label>
@@ -34,334 +32,65 @@
   </div>
 
   <div class="video-container" id="videoContainer">
-    <!-- video element or iframe will be injected here -->
-    <div id="loading-overlay" style="pointer-events:none;">
-      <div id="loadingText" style="background:rgba(0,0,0,0.6); padding:8px 12px; border-radius:6px;">Pronto</div>
-    </div>
+    <video id="player" class="video-js vjs-big-play-centered" controls preload="auto"></video>
   </div>
 
   <h3>Log</h3>
-  <pre id="output">Console log iniziale...</pre>
+  <pre id="output">Console log iniziale...[INIT] Frontend pronto. Inserisci TMDb ID e premi Carica.</pre>
 
   <script>
-    // ---------- CONFIG ----------
-    const VIXSRC_URL = "vixsrc.to"; // dominio vixsrc
-    let player = null;
-
-    // ---------- UTILITIES ----------
-    function applyCorsProxy(url) {
-      return `/.netlify/functions/proxy?url=${encodeURIComponent(url)}`;
-    }
+    const PROXY_PATH = "/.netlify/functions/proxy?url=";
 
     function log(...args) {
       const out = document.getElementById('output');
       const line = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
       console.log(...args);
-      out.textContent += line + "\n";
+      out.textContent += "\n" + line;
       out.scrollTop = out.scrollHeight;
     }
 
-    function showLoading(active, msg = "") {
-      const overlay = document.getElementById('loading-overlay');
-      const loadingText = document.getElementById('loadingText');
-      if (active) {
-        overlay.style.display = "flex";
-        loadingText.textContent = msg || "Caricamento...";
-      } else {
-        overlay.style.display = "none";
-        loadingText.textContent = "Pronto";
-      }
-    }
-
-    function showNotification(msg, type = "info") {
-      log(`[NOTIF ${type}] ${msg}`);
-    }
-
-    // Minimal stub: resume tracking (implement your storage logic here)
-    function trackAndResume(playerInstance, id, kind, season = null, episode = null) {
-      try {
-        const key = `vix_resume_${kind}_${id}_${season || 0}_${episode || 0}`;
-        const saved = localStorage.getItem(key);
-        if (saved) {
-          const t = parseFloat(saved);
-          if (!isNaN(t) && t > 0) {
-            playerInstance.currentTime(t);
-            log("[RESUME] Riprendo da", t);
-          }
-        }
-        // Save periodically
-        playerInstance.on('timeupdate', () => {
-          localStorage.setItem(key, playerInstance.currentTime());
-        });
-      } catch (e) {
-        console.warn("trackAndResume error", e);
-      }
-    }
-
-    // Hook per riscrivere richieste XHR/fetch di Video.js (opzionale)
-    function setupVideoJsXhrHook() {
-      // Video.js usa vhs (videojs-http-streaming) che usa fetch/XHR internamente.
-      // Qui possiamo intercettare le richieste se necessario. Implementazione minima:
-      if (!videojs || !videojs.Vhs) return;
-      // Non sovrascriviamo globalmente per evitare effetti collaterali in altri contesti.
-      log("[HOOK] setupVideoJsXhrHook eseguito (stub)");
-    }
-
-    // ---------- STREAM EXTRACTION ----------
-    async function getDirectStream(tmdbId, isMovie, season = null, episode = null) {
-      try {
-        showLoading(true, "Connessione al server...");
-        let vixsrcUrl = `https://${VIXSRC_URL}/${isMovie ? "movie" : "tv"}/${tmdbId}`;
-        if (!isMovie && season !== null && episode !== null && season !== "" && episode !== "") {
-          vixsrcUrl += `/${season}/${episode}`;
-        }
-
-        log("🎬 Fetching stream from:", vixsrcUrl);
-        showLoading(true, "Recupero pagina vixsrc...");
-        const response = await fetch(applyCorsProxy(vixsrcUrl));
-        const html = await response.text();
-
-        log("✅ Page fetched successfully, length:", html.length);
-        showLoading(true, "Estrazione parametri stream...");
-
-        // Prima prova: cerca pattern window.masterPlaylist params
-        const playlistParamsRegex = /window\.masterPlaylist[^:]+params:[^{]+({[^<]+?})/;
-        const playlistParamsMatch = html.match(playlistParamsRegex);
-
-        if (!playlistParamsMatch) {
-          // fallback: cerca token/expire in altre forme
-          log("❗ masterPlaylist non trovato, provo fallback di ricerca token/expire...");
-          // Cerca token ed expires in qualsiasi punto del documento
-          const tokenMatch = html.match(/token\s*[:=]\s*['"]([a-zA-Z0-9-_]+)['"]/i) || html.match(/token=([a-zA-Z0-9-_]+)/i);
-          const expiresMatch = html.match(/expires\s*[:=]\s*['"]?([0-9]{9,})['"]?/i) || html.match(/expires=([0-9]{9,})/i);
-          const urlMatch = html.match(/(https?:\/\/[^\s'"]+\.m3u8[^\s'"]*)/i);
-
-          if (!tokenMatch || !expiresMatch || !urlMatch) {
-            log("❌ HTML preview (500 chars):\n", html.substring(0, 500));
-            throw new Error("Impossibile trovare i parametri della playlist");
-          }
-
-          const playlistParams = { token: tokenMatch[1], expires: expiresMatch[1] };
-          const playlistUrl = urlMatch[1];
-          log("📋 Fallback parsed params:", playlistParams);
-          log("🔗 Fallback playlist URL:", playlistUrl);
-
-          const hasQuery = /\?[^#]+/.test(playlistUrl);
-          const separator = hasQuery ? "&" : "?";
-          const m3u8Url = playlistUrl + separator + "expires=" + playlistParams.expires + "&token=" + playlistParams.token;
-          log("🎬 Generated m3u8 URL (fallback):", m3u8Url);
-          showLoading(false);
-          return { iframeUrl: vixsrcUrl, m3u8Url };
-        }
-
-        let playlistParamsStr = playlistParamsMatch[1]
-          .replace(/'/g, '"')
-          .replace(/\s+/g, "")
-          .replace(/\n/g, "")
-          .replace(/\\n/g, "")
-          .replace(",}", "}");
-
-        log("📋 Playlist params string:", playlistParamsStr);
-
-        let playlistParams;
-        try {
-          playlistParams = JSON.parse(playlistParamsStr);
-        } catch (e) {
-          log("❌ Failed to parse params:", playlistParamsStr);
-          throw new Error("Errore nel parsing dei parametri: " + e.message);
-        }
-
-        log("✅ Parsed params:", playlistParams);
-
-        const playlistUrlRegex = /window\.masterPlaylist\s*=\s*\{[\s\S]*?url:\s*'([^']+)'/;
-        const playlistUrlMatch = html.match(playlistUrlRegex);
-
-        if (!playlistUrlMatch) {
-          throw new Error("Impossibile trovare l'URL della playlist");
-        }
-
-        const playlistUrl = playlistUrlMatch[1];
-        log("🔗 Playlist URL:", playlistUrl);
-
-        const canPlayFHDRegex = /window\.canPlayFHD\s+?=\s+?(\w+)/;
-        const canPlayFHDMatch = html.match(canPlayFHDRegex);
-        const canPlayFHD = canPlayFHDMatch && canPlayFHDMatch[1] === "true";
-        log("🎥 Can play FHD:", canPlayFHD);
-
-        const hasQuery = /\?[^#]+/.test(playlistUrl);
-        const separator = hasQuery ? "&" : "?";
-
-        const m3u8Url = playlistUrl + separator + "expires=" + playlistParams.expires + "&token=" + playlistParams.token + (canPlayFHD ? "&h=1" : "");
-        log("🎬 Generated m3u8 URL:", m3u8Url);
-
-        showLoading(false);
-        return { iframeUrl: vixsrcUrl, m3u8Url };
-      } catch (error) {
-        console.error("❌ Error in getDirectStream:", error);
-        showLoading(false);
-        showNotification("Errore durante l'estrazione dello stream: " + (error.message || error), "error");
+    async function fetchM3u8FromVixsrc(tmdbId, isMovie, season, episode) {
+      const pageUrl = `https://vixsrc.to/${isMovie ? "movie" : "tv"}/${tmdbId}` + (!isMovie && season && episode ? `/${season}/${episode}` : "");
+      log("🎬 Fetching stream from (via proxyfetch):", pageUrl);
+      const res = await fetch(PROXY_PATH + encodeURIComponent(pageUrl));
+      if (!res.ok) {
+        const txt = await res.text().catch(()=>"");
+        log("[ERROR] Extractor response:", res.status, txt);
         return null;
       }
+      const json = await res.json().catch(()=>null);
+      if (!json || !json.m3u8) {
+        log("[ERROR] No m3u8 in extractor response:", json);
+        return null;
+      }
+      log("✅ m3u8 ottenuto:", json.m3u8);
+      return json.m3u8;
     }
 
-    // ---------- HYBRID LOAD VIDEO ----------
-    async function loadVideo(isMovie, id, season = null, episode = null) {
-      showLoading(true);
-      const warning = document.getElementById("episode-warning");
-      if (warning) warning.classList.add("hidden");
-
-      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
-      const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
-
-      // IFRAME mode for iOS/Safari
-      if (isIOS || isSafari) {
-        log("🍏 iOS/Safari rilevato: uso iframe embed");
-        if (player) {
-          try { player.dispose(); } catch (e) {}
-          player = null;
-        }
-
-        const videoContainer = document.getElementById("videoContainer");
-        videoContainer.innerHTML = "";
-        let embedUrl = `https://${VIXSRC_URL}/${isMovie ? "movie" : "tv"}/${id}`;
-        if (!isMovie && season && episode) embedUrl += `/${season}/${episode}`;
-
-        const iframe = document.createElement("iframe");
-        iframe.src = embedUrl;
-        iframe.style.width = "100%";
-        iframe.style.height = "100%";
-        iframe.style.border = "none";
-        iframe.style.backgroundColor = "#000";
-        iframe.allow = "fullscreen; autoplay; encrypted-media";
-        videoContainer.appendChild(iframe);
-        showLoading(false);
-        return;
-      }
-
-      // Desktop/Android: Video.js mode
-      try {
-        setupVideoJsXhrHook();
-
-        if (player) {
-          try { player.dispose(); } catch (e) { console.warn(e); }
-          player = null;
-        }
-
-        const videoContainer = document.getElementById("videoContainer");
-        // remove previous children
-        videoContainer.innerHTML = '';
-        // re-add overlay
-        const overlay = document.createElement('div');
-        overlay.id = "loading-overlay";
-        overlay.style.position = "absolute";
-        overlay.style.inset = "0";
-        overlay.style.display = "none";
-        overlay.style.alignItems = "center";
-        overlay.style.justifyContent = "center";
-        overlay.innerHTML = '<div id="loadingText" style="background:rgba(0,0,0,0.6); padding:8px 12px; border-radius:6px;">Pronto</div>';
-        videoContainer.appendChild(overlay);
-
-        const newVideo = document.createElement("video");
-        newVideo.id = "player-video";
-        newVideo.className = "video-js vjs-theme-vixflix vjs-big-play-centered";
-        newVideo.setAttribute("controls", "");
-        newVideo.setAttribute("preload", "auto");
-        newVideo.setAttribute("crossorigin", "anonymous");
-        videoContainer.insertBefore(newVideo, overlay);
-
-        const streamData = await getDirectStream(id, isMovie, season, episode);
-        if (!streamData || !streamData.m3u8Url) throw new Error("Stream non trovato");
-
-        const isDeviceIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
-
-        player = videojs("player-video", {
-          controls: true,
-          fluid: true,
-          aspectRatio: "16:9",
-          html5: {
-            vhs: {
-              overrideNative: !isDeviceIOS,
-              bandwidth: 5000000
-            }
-          }
-        });
-
-        // Extend CurrentTimeDisplay to show current / total
-        const controlBar = player.getChild('controlBar');
-        const currentTimeDisplay = controlBar && controlBar.getChild('CurrentTimeDisplay');
-        if (currentTimeDisplay) {
-          const originalUpdate = currentTimeDisplay.update;
-          currentTimeDisplay.update = function (...args) {
-            originalUpdate.apply(this, args);
-            const current = player.currentTime();
-            const duration = player.duration();
-            const format = (sec) => {
-              if (isNaN(sec) || !isFinite(sec)) return '--:--';
-              const m = Math.floor(sec / 60);
-              const s = Math.floor(sec % 60).toString().padStart(2, '0');
-              return `${m}:${s}`;
-            };
-            this.el().innerHTML = `${format(current)} / ${format(duration)}`;
-          };
-        }
-
-        const proxied = applyCorsProxy(streamData.m3u8Url);
-        log("[INFO] Riproduzione via proxy con Video.js:", proxied);
-
-        player.src({ src: proxied, type: "application/x-mpegURL" });
-
-        player.ready(() => {
-          showLoading(false);
-          const savedVol = localStorage.getItem("vix_volume");
-          if (savedVol) player.volume(parseFloat(savedVol));
-          trackAndResume(player, id, isMovie ? 'movie' : 'tv', season, episode);
-          player.play().catch(() => {});
-          player.on('loadedmetadata', () => player.controlBar.getChild('CurrentTimeDisplay')?.update());
-        });
-
-        player.on('error', function() {
-          const err = player.error();
-          log("[ERRORE Video.js] ", err ? err.message : "Errore sconosciuto");
-        });
-
-        player.on('volumechange', () => {
-          localStorage.setItem("vix_volume", player.volume());
-        });
-
-      } catch (error) {
-        console.error("❌ Errore player:", error);
-        showLoading(false);
-        showNotification("Impossibile caricare il player nativo: " + (error.message || error), "error");
-      }
+    async function playM3u8(m3u8Url) {
+      const player = videojs("player");
+      const proxied = PROXY_PATH + encodeURIComponent(m3u8Url);
+      log("[INFO] Avvio player con manifest proxato:", proxied);
+      player.src({ src: proxied, type: "application/x-mpegURL" });
+      try { await player.play(); } catch(e) { log("[WARN] play() rejected:", e.message || e); }
     }
 
-    // ---------- TEST / UI HOOKS ----------
     document.getElementById('loadBtn').addEventListener('click', async () => {
       const tmdbId = document.getElementById('tmdbId').value.trim();
       const isMovie = document.getElementById('isMovie').checked;
       const season = document.getElementById('season').value || null;
       const episode = document.getElementById('episode').value || null;
-      if (!tmdbId) { showNotification("Inserisci un TMDb ID", "error"); return; }
-      await loadVideo(isMovie, tmdbId, season, episode);
+      if (!tmdbId) { log("[ERROR] Inserisci un TMDb ID"); return; }
+      const m3u8 = await fetchM3u8FromVixsrc(tmdbId, isMovie, season, episode);
+      if (m3u8) await playM3u8(m3u8);
     });
 
-    // Play a public test stream (Mux) to verify proxy + player
     document.getElementById('playTestMux').addEventListener('click', async () => {
       const testUrl = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8";
-      // Forza modalità desktop player
-      await loadVideo(true, "dummy", null, null); // will create player container
-      // If getDirectStream created an iframe for iOS, we still want to test direct URL:
-      if (player) {
-        player.src({ src: applyCorsProxy(testUrl), type: "application/x-mpegURL" });
-        player.play().catch(()=>{});
-        log("[TEST] Avviato test stream Mux via proxy");
-      } else {
-        // If iframe mode, open test in new tab
-        window.open(testUrl, "_blank");
-      }
+      log("[TEST] Avvio test stream Mux via proxyfetch");
+      await playM3u8(testUrl);
     });
 
-    // Initial log
     log("[INIT] Frontend pronto. Inserisci TMDb ID e premi Carica.");
   </script>
 </body>
