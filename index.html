@@ -2,37 +2,48 @@
 <html lang="it">
 <head>
   <meta charset="UTF-8">
-  <title>CORS Proxy su Netlify</title>
+  <title>CORS Proxy + HLS Player</title>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 </head>
 <body>
-  <h1>CORS Proxy Demo</h1>
-  <input id="urlInput" type="text" placeholder="Inserisci URL da proxare" size="50">
-  <button id="fetchBtn">Fetch</button>
+  <h1>Riproduzione HLS via Proxy</h1>
+
+  <!-- Campo per inserire l'URL m3u8 -->
+  <input id="urlInput" type="text" size="100"
+         placeholder="Inserisci URL m3u8 con token">
+  <button id="playBtn">Play</button>
+
+  <!-- Video player -->
+  <video id="video" controls autoplay width="640" height="360"></video>
 
   <pre id="output"></pre>
 
   <script>
-    async function fetchThroughProxy(url) {
-      const cached = localStorage.getItem(url);
-      if (cached) {
-        document.getElementById('output').textContent = "Cache hit:\n" + cached;
-        return;
-      }
-
+    async function playThroughProxy(url) {
       try {
-        const resp = await fetch(`/.netlify/functions/proxy?url=${encodeURIComponent(url)}`);
-        const text = await resp.text();
+        // Costruisco l’endpoint del proxy Netlify
+        const proxiedUrl = `/.netlify/functions/proxy?url=${encodeURIComponent(url)}`;
 
-        localStorage.setItem(url, text);
-        document.getElementById('output').textContent = text;
+        const video = document.getElementById('video');
+
+        if (Hls.isSupported()) {
+          const hls = new Hls();
+          hls.loadSource(proxiedUrl);
+          hls.attachMedia(video);
+          hls.on(Hls.Events.MANIFEST_PARSED, () => video.play());
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          // Safari/iOS supporta HLS nativamente
+          video.src = proxiedUrl;
+          video.play();
+        }
       } catch (err) {
         document.getElementById('output').textContent = "Errore: " + err.message;
       }
     }
 
-    document.getElementById('fetchBtn').addEventListener('click', () => {
+    document.getElementById('playBtn').addEventListener('click', () => {
       const url = document.getElementById('urlInput').value;
-      if (url) fetchThroughProxy(url);
+      if (url) playThroughProxy(url);
     });
   </script>
 </body>
