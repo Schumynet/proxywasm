@@ -2,48 +2,73 @@
 <html lang="it">
 <head>
   <meta charset="UTF-8">
-  <title>CORS Proxy + HLS Player</title>
+  <title>CORS Proxy + HLS Player con Log</title>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 </head>
 <body>
-  <h1>Riproduzione HLS via Proxy</h1>
+  <h1>Riproduzione HLS via Proxy (con log)</h1>
 
-  <!-- Campo per inserire l'URL m3u8 -->
   <input id="urlInput" type="text" size="100"
          placeholder="Inserisci URL m3u8 con token">
   <button id="playBtn">Play</button>
 
-  <!-- Video player -->
   <video id="video" controls autoplay width="640" height="360"></video>
-
   <pre id="output"></pre>
 
   <script>
     async function playThroughProxy(url) {
+      console.log("[INFO] URL originale:", url);
+
+      // Costruisco l’endpoint del proxy Netlify
+      const proxiedUrl = `/.netlify/functions/proxy?url=${encodeURIComponent(url)}`;
+      console.log("[INFO] URL proxato:", proxiedUrl);
+
+      const video = document.getElementById('video');
+
       try {
-        // Costruisco l’endpoint del proxy Netlify
-        const proxiedUrl = `/.netlify/functions/proxy?url=${encodeURIComponent(url)}`;
-
-        const video = document.getElementById('video');
-
         if (Hls.isSupported()) {
+          console.log("[INFO] hls.js supportato, inizializzo player...");
           const hls = new Hls();
+
+          hls.on(Hls.Events.ERROR, (event, data) => {
+            console.error("[ERRORE HLS]", data);
+            document.getElementById('output').textContent = "Errore HLS: " + data.details;
+          });
+
+          hls.on(Hls.Events.MANIFEST_LOADING, () => {
+            console.log("[LOG] Caricamento manifest dal proxy...");
+          });
+
+          hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+            console.log("[LOG] Manifest parsato, stream trovato:", data.levels.length, "qualità");
+            video.play();
+          });
+
           hls.loadSource(proxiedUrl);
           hls.attachMedia(video);
-          hls.on(Hls.Events.MANIFEST_PARSED, () => video.play());
+
         } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-          // Safari/iOS supporta HLS nativamente
+          console.log("[INFO] Safari/iOS: riproduzione nativa HLS");
           video.src = proxiedUrl;
           video.play();
+        } else {
+          console.warn("[WARN] HLS non supportato in questo browser");
+          document.getElementById('output').textContent = "HLS non supportato in questo browser";
         }
       } catch (err) {
+        console.error("[ERRORE]", err);
         document.getElementById('output').textContent = "Errore: " + err.message;
       }
     }
 
     document.getElementById('playBtn').addEventListener('click', () => {
       const url = document.getElementById('urlInput').value;
-      if (url) playThroughProxy(url);
+      if (url) {
+        console.log("[AZIONE] Bottone Play premuto");
+        playThroughProxy(url);
+      } else {
+        console.warn("[WARN] Nessun URL inserito");
+      }
     });
   </script>
 </body>
