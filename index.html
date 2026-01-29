@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <title>CORS Proxy su Netlify</title>
+</head>
+<body>
+  <h1>CORS Proxy Demo</h1>
+  <input id="urlInput" type="text" placeholder="Inserisci URL da proxare" size="50">
+  <button id="fetchBtn">Fetch</button>
+
+  <pre id="output"></pre>
+
+  <script>
+    async function fetchThroughProxy(url) {
+      const cached = localStorage.getItem(url);
+      if (cached) {
+        document.getElementById('output').textContent = "Cache hit:\n" + cached;
+        return;
+      }
+
+      try {
+        const resp = await fetch(`/.netlify/functions/proxy?url=${encodeURIComponent(url)}`);
+        const text = await resp.text();
+
+        localStorage.setItem(url, text);
+        document.getElementById('output').textContent = text;
+      } catch (err) {
+        document.getElementById('output').textContent = "Errore: " + err.message;
+      }
+    }
+
+    document.getElementById('fetchBtn').addEventListener('click', () => {
+      const url = document.getElementById('urlInput').value;
+      if (url) fetchThroughProxy(url);
+    });
+  </script>
+</body>
+</html>
