@@ -1,10 +1,29 @@
 // netlify/functions/proxy.js
-// Netlify Function che esegue un vero proxyfetch server-side:
-// - per pagine vixsrc: fetch server-side, estrazione token/expires/url/canPlayFHD, restituisce JSON { m3u8 }
-// - per manifest .m3u8: fetch server-side, riscrive tutte le URL per far passare i segmenti dal proxy
-// - per risorse binarie: fetch server-side e ritorna base64 (isBase64Encoded: true)
+// Netlify Function "proxy" - file intero
+//
+// Funzionalità:
+// - Se target è una pagina vixsrc (movie/tv) prova a estrarre token/expires/url/canPlayFHD
+//   * Usa cloudscraper se è installato (risolve challenge JS/Cloudflare nella maggior parte dei casi)
+//   * Altrimenti prova con fetch normale (meno affidabile)
+// - Se target è un .m3u8 riscrive tutte le URL (variant playlists, segmenti, EXT-X-KEY) in modo che
+//   tutte le risorse passino di nuovo dal proxy
+// - Per risorse binarie (.ts, key, immagini, ecc.) fa proxyfetch server-side e ritorna base64
+// - Log dettagliati per debug (console.log)
+// - Restituisce JSON con preview HTML quando non trova i parametri (utile per capire challenge)
 
-exports.handler = async function(event) {
+const EXTRACTOR_USE_CLOUDSCRAPER = true; // imposta a false se non vuoi usare cloudscraper
+let cloudscraper = null;
+if (EXTRACTOR_USE_CLOUDSCRAPER) {
+  try {
+    cloudscraper = require("cloudscraper");
+    console.log("[PROXY] cloudscraper disponibile, lo userò per fetch delle pagine vixsrc");
+  } catch (e) {
+    console.log("[PROXY] cloudscraper non trovato, userò fetch normale. Per installarlo: npm i cloudscraper");
+    cloudscraper = null;
+  }
+}
+
+exports.handler = async function (event) {
   const params = event.queryStringParameters || {};
   const target = params.url;
   if (!target) {
@@ -17,13 +36,43 @@ exports.handler = async function(event) {
   try {
     // --- 1) Pagina vixsrc (movie/tv) -> estrai m3u8
     if (/vixsrc\.to\/(movie|tv)\//i.test(target)) {
-      console.log("[PROXY] Fetching vixsrc page (server-side):", target);
-      const pageRes = await fetch(target, {
-        headers: { "User-Agent": "Mozilla/5.0", "Referer": "https://vixsrc.to" },
-        redirect: "follow"
-      });
+      console.log("[PROXY] Handling vixsrc page:", target);
 
-      const html = await pageRes.text();
+      // funzione helper per fetch della pagina (cloudscraper se disponibile)
+      async function fetchPage(url) {
+        if (cloudscraper) {
+          try {
+            // cloudscraper.get restituisce il body come stringa
+            const html = await cloudscraper.get(url, {
+              headers: { Referer: "https://vixsrc.to", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
+              timeout: 30000
+            });
+            return { ok: true, text: html };
+          } catch (err) {
+            console.log("[PROXY] cloudscraper fetch error:", String(err).substring(0, 300));
+            return { ok: false, error: String(err) };
+          }
+        } else {
+          // fallback: fetch globale (Node 18+ in Netlify)
+          try {
+            const r = await fetch(url, { headers: { Referer: "https://vixsrc.to", "User-Agent": "Mozilla/5.0" }, redirect: "follow" });
+            const text = await r.text();
+            return { ok: r.ok, status: r.status, text };
+          } catch (err) {
+            console.log("[PROXY] fetch error:", String(err).substring(0, 300));
+            return { ok: false, error: String(err) };
+          }
+        }
+      }
+
+      const pageFetch = await fetchPage(target);
+      if (!pageFetch.ok) {
+        const errMsg = pageFetch.error || `status ${pageFetch.status}`;
+        console.log("[PROXY] ❌ Page fetch failed:", errMsg);
+        return { statusCode: 502, body: "Page fetch failed: " + errMsg };
+      }
+
+      const html = pageFetch.text || "";
       console.log("[PROXY] Page fetched, length:", html.length);
 
       // regex permissiva ispirata al tuo script Python
@@ -37,21 +86,21 @@ exports.handler = async function(event) {
           u.searchParams.set("expires", expires);
           if (fhd) u.searchParams.set("h", "1");
           const m3u8 = u.toString();
-          console.log("[PROXY] ✅ Extracted m3u8 (server-side):", m3u8);
+          console.log("[PROXY] ✅ Extracted m3u8:", m3u8);
           return {
             statusCode: 200,
             headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
             body: JSON.stringify({ m3u8 })
           };
         } catch (e) {
-          console.log("[PROXY] ❌ Invalid rawUrl:", rawUrl, e.message || e);
+          console.log("[PROXY] ❌ Invalid rawUrl:", rawUrl, e && e.message ? e.message : e);
         }
       }
 
       // fallback: cerca playlist già completa nel HTML
       const m2 = html.match(/(https?:\/\/[^\s'"]+\/playlist\/[0-9]+\?[^\s'"]+)/i);
       if (m2) {
-        console.log("[PROXY] ✅ Found direct playlist (server-side):", m2[1]);
+        console.log("[PROXY] ✅ Found direct playlist:", m2[1]);
         return {
           statusCode: 200,
           headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
@@ -59,9 +108,13 @@ exports.handler = async function(event) {
         };
       }
 
-      // se non troviamo i parametri, log dell'anteprima HTML per debug
+      // Non trovato: restituisci preview HTML per debug (utile per capire se è challenge Cloudflare)
       console.log("[PROXY] ❌ Params not found, HTML preview (300 chars):", html.substring(0, 300));
-      return { statusCode: 422, headers: { "Access-Control-Allow-Origin": "*" }, body: "params not found" };
+      return {
+        statusCode: 422,
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+        body: JSON.stringify({ error: "params_not_found", page_length: html.length, html_preview: html.substring(0, 2000) })
+      };
     }
 
     // --- 2) Manifest .m3u8 -> fetch server-side e riscrittura per proxare segmenti/chiavi
@@ -107,7 +160,7 @@ exports.handler = async function(event) {
         return `/.netlify/functions/proxy?url=${encodeURIComponent(resolved)}`;
       }).join("\n");
 
-      console.log("[PROXY] ✅ Manifest rewritten (server-side), length:", rewritten.length);
+      console.log("[PROXY] ✅ Manifest rewritten, length:", rewritten.length);
       return {
         statusCode: 200,
         headers: { "Content-Type": "application/vnd.apple.mpegurl", "Access-Control-Allow-Origin": "*" },
@@ -115,7 +168,7 @@ exports.handler = async function(event) {
       };
     }
 
-    // --- 3) Risorsa binaria -> fetch server-side e ritorna base64
+    // --- 3) Risorsa binaria -> fetch server-side e ritorna base64 (Netlify Function richiede base64 per body binari)
     console.log("[PROXY] Fetching binary resource (server-side):", target);
     const binRes = await fetch(target, { redirect: "follow" });
     const arrayBuffer = await binRes.arrayBuffer();
